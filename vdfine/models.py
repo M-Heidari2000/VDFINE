@@ -42,7 +42,7 @@ class Encoder(nn.Module):
     def forward(self, y):
         hidden = self.mlp_layers(y)
         mean = self.mean_head(hidden)
-        cov = torch.diag_embed(self.cov_head(hidden)) + self.min_var
+        cov = torch.diag_embed(self.cov_head(hidden) + self.min_var)
         return MultivariateNormal(loc=mean, covariance_matrix=cov)
     
 
@@ -81,7 +81,7 @@ class Decoder(nn.Module):
     def forward(self, a):
         hidden = self.mlp_layers(a)
         mean = self.mean_head(hidden)
-        cov = torch.diag_embed(self.cov_head(hidden)) + self.min_var
+        cov = torch.diag_embed(self.cov_head(hidden) + self.min_var)
         return MultivariateNormal(loc=mean, covariance_matrix=cov)
     
 

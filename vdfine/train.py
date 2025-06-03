@@ -114,7 +114,7 @@ def train(
         q_x = [MultivariateNormal(
             loc=torch.zeros((config.batch_size, config.x_dim), dtype=torch.float32, device=device),
             covariance_matrix=torch.diag_embed(torch.ones((config.batch_size, config.x_dim), device=device, dtype=torch.float32)),
-        )] * config.chunk_length
+        ) for _ in range(config.chunk_length) ] 
 
         # Kalman filtering
         for t in range(1, config.chunk_length):
@@ -175,10 +175,10 @@ def train(
         clip_grad_norm_(all_params, config.clip_grad_norm)
         optimizer.step()
 
-        writer.add_scalar("train/ loss1", loss1.item(), update+1)
-        writer.add_scalar("train/ loss2", loss2.item(), update+1)
-        writer.add_scalar("train/ loss3", loss3.item(), update+1)
-        writer.add_scalar("train/ total loss", loss.item(), update+1)
+        writer.add_scalar("train/loss1", loss1.item(), update+1)
+        writer.add_scalar("train/loss2", loss2.item(), update+1)
+        writer.add_scalar("train/loss3", loss3.item(), update+1)
+        writer.add_scalar("train/total loss", loss.item(), update+1)
         print(f"update step: {update+1}, train_loss: {loss.item()}")
 
         # test
@@ -210,12 +210,12 @@ def train(
                     "(l b) a -> l b a",
                     b=config.batch_size
                 )
-
+                
                 # Initial distribution N(0, I)
                 q_x = [MultivariateNormal(
                     loc=torch.zeros((config.batch_size, config.x_dim), dtype=torch.float32, device=device),
                     covariance_matrix=torch.diag_embed(torch.ones((config.batch_size, config.x_dim), device=device, dtype=torch.float32)),
-                )] * config.chunk_length
+                ) for _ in range(config.chunk_length) ] 
 
                 # Kalman filtering
                 for t in range(1, config.chunk_length):
@@ -271,10 +271,10 @@ def train(
 
                 loss = loss1 + loss2 + loss3
 
-                writer.add_scalar("test/ loss1", loss1.item(), update+1)
-                writer.add_scalar("test/ loss2", loss2.item(), update+1)
-                writer.add_scalar("test/ loss3", loss3.item(), update+1)
-                writer.add_scalar("test/ total loss", loss.item(), update+1)
+                writer.add_scalar("test/loss1", loss1.item(), update+1)
+                writer.add_scalar("test/loss2", loss2.item(), update+1)
+                writer.add_scalar("test/loss3", loss3.item(), update+1)
+                writer.add_scalar("test/total loss", loss.item(), update+1)
                 print(f"update step: {update+1}, test_loss: {loss.item()}")
 
     torch.save(encoder.state_dict(), log_dir / "encoder.pth")
