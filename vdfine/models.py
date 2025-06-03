@@ -267,7 +267,6 @@ class Dynamics(nn.Module):
         self,
         x_sample,
         u,
-        steps: int
     ):
         """
             p(x_t|x_{t-d}, u_{t-d:t-1})
@@ -275,11 +274,10 @@ class Dynamics(nn.Module):
             inputs:
                 - x_sample: sample of x_{t-d}
                 - u: u_{t-d:t-1}
-                - steps: number of steps            
         """
         Nx = torch.diag(nn.functional.softplus(self.nx) + self._min_var)    # shape: x x
 
-        
+        steps = u.shape[0]
         mean = x_sample @ self.A.T + u[0] @ self.B.T
         cov = Nx
 
@@ -305,5 +303,20 @@ class Dynamics(nn.Module):
 
         dist = self.dynamics_update(dist=dist, u=u)
         dist = self.measurement_update(dist=dist, a=a)
+
+        return dist
+    
+    def compute_a_prior(
+        self,
+        x
+    ):
+        
+        Na = torch.diag(nn.functional.softplus(self.na) + self._min_var)    # shape: a a
+        mean = x @ self.C.T
+        cov = Na.repeat(x.shape[0], 1, 1)
+        dist = MultivariateNormal(
+            loc=mean,
+            covariance_matrix=cov
+        )
 
         return dist
