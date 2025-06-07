@@ -137,14 +137,12 @@ def train(
 
             # second loss term
             # q(x_{t-d}|a_{1:t-d}, u_{0:t-d-1})
-            past_q_x_sample = q_x[t-config.overshoot_d].rsample()
-
+            past_q_x = q_x[t-config.overshoot_d]
             # p(x_t|x_{t-d, u_{t-d:t-1}})
             current_p_x = dynamics_model.prior(
-                x_sample=past_q_x_sample,
+                dist=past_q_x,
                 u=u[t-config.overshoot_d: t]
             )
-
             # q(x_t|a_{1:t}, u_{0:t-1})
             current_q_x = q_x[t]
             loss2 += kl_divergence(current_q_x, current_p_x).clamp(min=config.kl_free_nats).mean()
@@ -239,14 +237,12 @@ def train(
 
                     # second loss term
                     # q(x_{t-d}|a_{1:t-d}, u_{0:t-d-1})
-                    past_q_x_sample = q_x[t-config.overshoot_d].rsample()
-
+                    past_q_x = q_x[t-config.overshoot_d]
                     # p(x_t|x_{t-d, u_{t-d:t-1}})
                     current_p_x = dynamics_model.prior(
-                        x_sample=past_q_x_sample,
+                        dist=past_q_x,
                         u=u[t-config.overshoot_d: t]
                     )
-
                     # q(x_t|a_{1:t}, u_{0:t-1})
                     current_q_x = q_x[t]
                     loss2 += kl_divergence(current_q_x, current_p_x).clamp(min=config.kl_free_nats).mean()

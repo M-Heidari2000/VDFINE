@@ -272,23 +272,23 @@ class Dynamics(nn.Module):
         
     def prior_step(        
         self,
-        x_sample,
-        u,
+        dist: MultivariateNormal,
+        u: torch.Tensor,
     ):
         """
             p(x_t|x_{t-d}, u_{t-d:t-1})
 
             inputs:
-                - x_sample: sample of x_{t-d}
+                - dist: posterior distribution of of x_{t-d}
                 - u: u_{t-d:t-1}
         """
         Nx = torch.diag(nn.functional.softplus(self.nx) + self._min_var)    # shape: x x
 
+        mean = dist.loc
+        cov = dist.covariance_matrix
         steps = u.shape[0]
-        mean = x_sample @ self.A.T + u[0] @ self.B.T
-        cov = Nx
 
-        for d in range(1, steps):
+        for d in range(0, steps):
             mean = mean @ self.A.T + u[d] @ self.B.T
             cov = self.A @ cov @ self.A.T + Nx
 
