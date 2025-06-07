@@ -22,5 +22,7 @@ class TrainConfig:
     # TODO: add weighting or free nats
     kl_free_nats: int = 3
     a_free_nats: int = 3
+    kl_beta: float = 1.0
+    a_beta: float = 1.0
 
     dict = asdict

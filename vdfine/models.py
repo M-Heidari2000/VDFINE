@@ -210,6 +210,11 @@ class Dynamics(nn.Module):
 
         return U @ d.sqrt().diag() @ Q @ (1 / (1+d).sqrt()).diag() @ U.T
     
+    def make_pd(self, P, eps=1e-6):
+        P = 0.5 * (P + P.transpose(-1, -2))
+        P = P + eps * torch.eye(P.size(-1), device=P.device)
+        return P
+    
     def dynamics_update(
         self,
         dist: MultivariateNormal,
@@ -233,6 +238,7 @@ class Dynamics(nn.Module):
         Nx = torch.diag(nn.functional.softplus(self.nx) + self._min_var)    # shape: x x
         next_mean = mean @ self.A.T + u @ self.B.T
         next_cov = self.A @ cov @ self.A.T + Nx
+        next_cov = self.make_pd(next_cov)
 
         return MultivariateNormal(loc=next_mean, covariance_matrix=next_cov)
     
@@ -260,6 +266,7 @@ class Dynamics(nn.Module):
         K = cov @ self.C.T @ torch.linalg.pinv(self.C @ cov @ self.C.T + Na)
         next_mean = mean + ((a - mean @ self.C.T).unsqueeze(1) @ K.transpose(1, 2)).squeeze(1)
         next_cov = (torch.eye(self.x_dim, device=self.device) - K @ self.C) @ cov
+        next_cov = self.make_pd(next_cov)
 
         return MultivariateNormal(loc=next_mean, covariance_matrix=next_cov)
         

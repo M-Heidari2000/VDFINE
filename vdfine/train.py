@@ -2,6 +2,7 @@ import os
 import json
 import torch
 import einops
+import torch.nn as nn
 import numpy as np
 from pathlib import Path
 from datetime import datetime
@@ -70,7 +71,7 @@ def train(
         x_dim=config.x_dim,
         u_dim=train_replay_buffer.u_dim,
         device=device
-    )
+    ).to(device)
 
     all_params = (
         list(encoder.parameters()) +
@@ -127,6 +128,7 @@ def train(
         loss1 = 0.0
         loss2 = 0.0
         loss3 = 0.0
+        cost_loss = 0.0
 
         for t in range(config.overshoot_d+1, config.chunk_length):
             # first loss term
@@ -136,18 +138,15 @@ def train(
             # second loss term
             # q(x_{t-d}|a_{1:t-d}, u_{0:t-d-1})
             past_q_x_sample = q_x[t-config.overshoot_d].rsample()
-            # p(x_{t-1}|x_{t-d, u_{t-d:t-2}})
-            past_p_x_sample = dynamics_model.prior_step(
+
+            # p(x_t|x_{t-d, u_{t-d:t-1}})
+            current_p_x = dynamics_model.prior(
                 x_sample=past_q_x_sample,
-                u=u[t-config.overshoot_d: t-1]
-            ).rsample()
+                u=u[t-config.overshoot_d: t]
+            )
+
             # q(x_t|a_{1:t}, u_{0:t-1})
             current_q_x = q_x[t]
-            # p(x_t|x_{t-1}, u_{t-1})
-            current_p_x = dynamics_model.prior_step(
-                x_sample=past_p_x_sample,
-                u=u[[t-1]]
-            )
             loss2 += kl_divergence(current_q_x, current_p_x).clamp(min=config.kl_free_nats).mean()
 
             # third loss term
@@ -164,12 +163,14 @@ def train(
                 - current_p_a.log_prob(q_a_samples[t])
             ).clamp(min=config.a_free_nats).mean()
 
+            cost_loss += nn.MSELoss()(cost_model(x=current_q_x_sample, u=u[t]), c[t])
 
         loss1 /= (config.chunk_length - config.overshoot_d - 1)
         loss2 /= (config.chunk_length - config.overshoot_d - 1)
         loss3 /= (config.chunk_length - config.overshoot_d - 1)
+        cost_loss /= (config.chunk_length - config.overshoot_d - 1)
 
-        loss = loss1 + loss2 + loss3
+        loss = loss1 + config.kl_beta * loss2 + config.a_beta * loss3 + config.cost_reconstruction_weight * cost_loss
         optimizer.zero_grad()
         loss.backward()
         clip_grad_norm_(all_params, config.clip_grad_norm)
@@ -178,6 +179,7 @@ def train(
         writer.add_scalar("train/loss1", loss1.item(), update+1)
         writer.add_scalar("train/loss2", loss2.item(), update+1)
         writer.add_scalar("train/loss3", loss3.item(), update+1)
+        writer.add_scalar("train/cost_loss", cost_loss.item(), update+1)
         writer.add_scalar("train/total loss", loss.item(), update+1)
         print(f"update step: {update+1}, train_loss: {loss.item()}")
 
@@ -210,7 +212,7 @@ def train(
                     "(l b) a -> l b a",
                     b=config.batch_size
                 )
-                
+
                 # Initial distribution N(0, I)
                 q_x = [MultivariateNormal(
                     loc=torch.zeros((config.batch_size, config.x_dim), dtype=torch.float32, device=device),
@@ -228,6 +230,7 @@ def train(
                 loss1 = 0.0
                 loss2 = 0.0
                 loss3 = 0.0
+                cost_loss = 0.0
 
                 for t in range(config.overshoot_d+1, config.chunk_length):
                     # first loss term
@@ -237,18 +240,15 @@ def train(
                     # second loss term
                     # q(x_{t-d}|a_{1:t-d}, u_{0:t-d-1})
                     past_q_x_sample = q_x[t-config.overshoot_d].rsample()
-                    # p(x_{t-1}|x_{t-d, u_{t-d:t-2}})
-                    past_p_x_sample = dynamics_model.prior_step(
+
+                    # p(x_t|x_{t-d, u_{t-d:t-1}})
+                    current_p_x = dynamics_model.prior(
                         x_sample=past_q_x_sample,
-                        u=u[t-config.overshoot_d: t-1]
-                    ).rsample()
+                        u=u[t-config.overshoot_d: t]
+                    )
+
                     # q(x_t|a_{1:t}, u_{0:t-1})
                     current_q_x = q_x[t]
-                    # p(x_t|x_{t-1}, u_{t-1})
-                    current_p_x = dynamics_model.prior_step(
-                        x_sample=past_p_x_sample,
-                        u=u[[t-1]]
-                    )
                     loss2 += kl_divergence(current_q_x, current_p_x).clamp(min=config.kl_free_nats).mean()
 
                     # third loss term
@@ -265,15 +265,19 @@ def train(
                         - current_p_a.log_prob(q_a_samples[t])
                     ).clamp(min=config.a_free_nats).mean()
 
+                    cost_loss += nn.MSELoss()(cost_model(x=current_q_x_sample, u=u[t]), c[t])
+
                 loss1 /= (config.chunk_length - config.overshoot_d - 1)
                 loss2 /= (config.chunk_length - config.overshoot_d - 1)
                 loss3 /= (config.chunk_length - config.overshoot_d - 1)
+                cost_loss /= (config.chunk_length - config.overshoot_d - 1)
 
-                loss = loss1 + loss2 + loss3
+                loss = loss1 + config.kl_beta * loss2 + config.a_beta * loss3 + config.cost_reconstruction_weight * cost_loss
 
                 writer.add_scalar("test/loss1", loss1.item(), update+1)
                 writer.add_scalar("test/loss2", loss2.item(), update+1)
                 writer.add_scalar("test/loss3", loss3.item(), update+1)
+                writer.add_scalar("test/cost_loss", cost_loss.item(), update+1)
                 writer.add_scalar("test/total loss", loss.item(), update+1)
                 print(f"update step: {update+1}, test_loss: {loss.item()}")
 
