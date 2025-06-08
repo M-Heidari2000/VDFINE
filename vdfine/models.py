@@ -22,6 +22,8 @@ class Encoder(nn.Module):
         super().__init__()
 
         self.min_var = min_var
+        self.a_dim = a_dim
+        self.y_dim = y_dim
 
         self.mlp_layers = nn.Sequential(
             nn.Linear(y_dim, hidden_dim),
@@ -33,16 +35,19 @@ class Encoder(nn.Module):
         )
 
         self.mean_head = nn.Linear(hidden_dim, a_dim)
-        # TODO: later try to learn full covariance matrix
-        self.cov_head = nn.Sequential(
-            nn.Linear(hidden_dim, a_dim),
-            nn.Softplus()
-        )
+        self.cov_head = nn.Linear(hidden_dim, a_dim*a_dim)
+
+    def make_pd(self, P):
+        P = 0.5 * (P + P.transpose(-1, -2))
+        P = P + self.min_var * torch.eye(P.size(-1), device=P.device)
+        return P
 
     def forward(self, y):
         hidden = self.mlp_layers(y)
         mean = self.mean_head(hidden)
-        cov = torch.diag_embed(self.cov_head(hidden) + self.min_var)
+        cov = self.cov_head(hidden).reshape(-1, self.a_dim, self.a_dim)
+        cov = torch.bmm(cov, cov.transpose(1, 2))
+        cov = self.make_pd(cov)
         return MultivariateNormal(loc=mean, covariance_matrix=cov)
     
 

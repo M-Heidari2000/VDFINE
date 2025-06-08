@@ -115,7 +115,7 @@ def train(
         q_x = [MultivariateNormal(
             loc=torch.zeros((config.batch_size, config.x_dim), dtype=torch.float32, device=device),
             covariance_matrix=torch.diag_embed(torch.ones((config.batch_size, config.x_dim), device=device, dtype=torch.float32)),
-        ) for _ in range(config.chunk_length) ] 
+        ) for _ in range(config.chunk_length)] 
 
         # Kalman filtering
         for t in range(1, config.chunk_length):
@@ -139,7 +139,7 @@ def train(
             # q(x_{t-d}|a_{1:t-d}, u_{0:t-d-1})
             past_q_x = q_x[t-config.overshoot_d]
             # p(x_t|x_{t-d, u_{t-d:t-1}})
-            current_p_x = dynamics_model.prior(
+            current_p_x = dynamics_model.prior_step(
                 dist=past_q_x,
                 u=u[t-config.overshoot_d: t]
             )
@@ -215,7 +215,7 @@ def train(
                 q_x = [MultivariateNormal(
                     loc=torch.zeros((config.batch_size, config.x_dim), dtype=torch.float32, device=device),
                     covariance_matrix=torch.diag_embed(torch.ones((config.batch_size, config.x_dim), device=device, dtype=torch.float32)),
-                ) for _ in range(config.chunk_length) ] 
+                ) for _ in range(config.chunk_length)]
 
                 # Kalman filtering
                 for t in range(1, config.chunk_length):
@@ -239,7 +239,7 @@ def train(
                     # q(x_{t-d}|a_{1:t-d}, u_{0:t-d-1})
                     past_q_x = q_x[t-config.overshoot_d]
                     # p(x_t|x_{t-d, u_{t-d:t-1}})
-                    current_p_x = dynamics_model.prior(
+                    current_p_x = dynamics_model.prior_step(
                         dist=past_q_x,
                         u=u[t-config.overshoot_d: t]
                     )
