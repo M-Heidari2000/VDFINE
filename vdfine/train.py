@@ -132,8 +132,8 @@ def train(
 
         for t in range(config.overshoot_d+1, config.chunk_length):
             # first loss term
-            p_y = decoder(q_a_samples[t])
-            loss1 -= p_y.log_prob(y[t]).mean()
+            y_recon = decoder(q_a_samples[t])
+            loss1 += nn.MSELoss()(y_recon, y[t])
 
             # second loss term
             # q(x_{t-d}|a_{1:t-d}, u_{0:t-d-1})
@@ -232,8 +232,8 @@ def train(
 
                 for t in range(config.overshoot_d+1, config.chunk_length):
                     # first loss term
-                    p_y = decoder(q_a_samples[t])
-                    loss1 -= p_y.log_prob(y[t]).mean()
+                    y_recon = decoder(q_a_samples[t])
+                    loss1 += nn.MSELoss()(y_recon, y[t])
 
                     # second loss term
                     # q(x_{t-d}|a_{1:t-d}, u_{0:t-d-1})

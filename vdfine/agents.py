@@ -191,7 +191,7 @@ class MPCAgent:
                 self.quadcost,
                 self.lindx
             )
-        
+            
         return np.clip(planned_u.squeeze(1).cpu().numpy(), a_min=-1.0, a_max=1.0)
     
     def reset(self):
