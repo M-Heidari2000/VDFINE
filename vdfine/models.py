@@ -82,6 +82,37 @@ class Decoder(nn.Module):
         return self.mlp_layers(a)
     
 
+class ZDecoder(nn.Module):
+    """
+        p(z_t|a_t)
+    """
+
+    def __init__(
+        self,
+        x_dim: int,
+        z_dim: int,
+        hidden_dim: Optional[int],
+        dropout_p: Optional[float] = 0.2,
+        min_var: Optional[float] = 1e-3,
+    ):
+        
+        super().__init__()
+        self.min_var = min_var
+
+        self.mlp_layers = nn.Sequential(
+            nn.Linear(x_dim, hidden_dim),
+            nn.Dropout(p=dropout_p),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Dropout(p=dropout_p),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, z_dim),
+        )
+
+    def forward(self, a):
+        return self.mlp_layers(a)
+
+
 class CostModel(nn.Module):
     """
         Learnable quadratic cost function in the latent space

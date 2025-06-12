@@ -16,3 +16,4 @@ env/
 pytest_cache/
 
 *.ipynb
+*.pdf
