@@ -17,7 +17,6 @@ class TrainConfig:
     lr: float = 1e-3
     eps: float = 1e-8
     clip_grad_norm: int = 1000
-    cost_reconstruction_weight: float = 1.0
     overshoot_d: int = 3
     # TODO: add weighting or free nats
     kl_free_nats: int = 3
