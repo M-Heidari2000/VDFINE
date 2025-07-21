@@ -266,30 +266,6 @@ class Dynamics(nn.Module):
         next_cov = self.make_pd(next_cov)
 
         return MultivariateNormal(loc=next_mean, covariance_matrix=next_cov)
-        
-    def prior_step(        
-        self,
-        dist: MultivariateNormal,
-        u: torch.Tensor,
-    ):
-        """
-            p(x_t|x_{t-d}, u_{t-d:t-1})
-
-            inputs:
-                - dist: posterior distribution of of x_{t-d}
-                - u: u_{t-d:t-1}
-        """
-        Nx = torch.diag(nn.functional.softplus(self.nx) + self._min_var)    # shape: x x
-
-        mean = dist.loc
-        cov = dist.covariance_matrix
-        steps = u.shape[0]
-
-        for d in range(0, steps):
-            mean = mean @ self.A.T + u[d] @ self.B.T
-            cov = self.A @ cov @ self.A.T + Nx
-
-        return MultivariateNormal(mean, cov)
     
     def posterior_step(
         self,
@@ -324,3 +300,69 @@ class Dynamics(nn.Module):
         )
 
         return dist
+    
+    def compute_kl_loss(
+        self,
+        past_q_x: MultivariateNormal,
+        current_q_x: MultivariateNormal,
+        u: torch.Tensor,
+    ):
+        """
+            compute the kl loss in ELBO
+            inputs:
+                past_q_x: q(x_{t-d}|a_{1:t-d}, u_{0:t-d-1})
+                current_q_x = q(x_t|a_{1:t}, u_{0:t-1})
+                u: u_{t-d:t-1}
+        """
+        
+        Nx = torch.diag(nn.functional.softplus(self.nx) + self._min_var)    # shape: x x
+
+        mu_t = current_q_x.loc
+        sigma_t = current_q_x.covariance_matrix
+        mu_t_d = past_q_x.loc
+        sigma_t_d = past_q_x.covariance_matrix
+
+        # mu_d here is the same as mu_d_bar in the derivation
+        mu_d = past_q_x.loc
+        sigma_d = torch.zeros_like(past_q_x.covariance_matrix)
+        d = u.shape[0]
+        b, n = mu_t.shape
+
+        for t in range(d):
+            mu_d = mu_d @ self.A.T + u[t] @ self.B.T
+            sigma_d = self.A @ sigma_d @ self.A.T + Nx
+
+        # ensure sigma_d stays PD
+        sigma_d = self.make_pd(sigma_d)
+
+        # kl computation
+        A_d   = torch.matrix_power(self.A, d)   # shape: x x
+        sigma_from_past = torch.einsum('ij, bjk, kl -> bil', A_d, sigma_t_d, A_d.T)     # shape: b x x
+        sigma_d_inv = torch.linalg.inv(sigma_d)
+
+        # logdet
+        logdet = torch.logdet(sigma_d) - torch.logdet(sigma_t)
+        
+        # trace1
+        trace1 = torch.diagonal(
+            sigma_d_inv @ sigma_t,
+            dim1=-1,
+            dim2=-2
+        ).sum(dim=-1)
+
+        # trace2
+        trace2 = torch.diagonal(
+            sigma_d_inv @ sigma_from_past,
+            dim1=-1,
+            dim2=-2
+        ).sum(dim=-1)
+
+        # quadratic term
+        diff = mu_d - mu_t
+        quad = (
+            diff.unsqueeze(1) @ sigma_d_inv @ diff.unsqueeze(-1)
+        ).squeeze(-1).squeeze(-1)
+
+        const = -n * torch.ones_like(logdet)
+
+        return 0.5 * (trace1 + trace2 + quad + const + logdet)
