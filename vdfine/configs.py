@@ -12,6 +12,7 @@ class TrainConfig:
     dropout_p: float=0.4
     test_interval: int = 10
     num_updates: int = 100
+    num_cost_updates: int = 500
     chunk_length: int = 10
     batch_size: int = 64
     lr: float = 1e-3

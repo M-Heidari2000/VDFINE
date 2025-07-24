@@ -343,7 +343,7 @@ def train_cost(
     optimizer = torch.optim.Adam(all_params, lr=config.lr, eps=config.eps)
 
     # train and test loop
-    for update in range(config.num_updates):
+    for update in range(config.num_cost_updates):
 
         # train
         cost_model.train()
