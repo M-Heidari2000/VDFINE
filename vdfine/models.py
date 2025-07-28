@@ -207,6 +207,17 @@ class Dynamics(nn.Module):
 
         return U @ d.sqrt().diag() @ Q @ (1 / (1+d).sqrt()).diag() @ U.T
     
+    @property
+    def Na(self):
+        Na = torch.diag(nn.functional.softplus(self.na) + self._min_var)    # shape: a a
+        return Na
+    
+    @property
+    def Nx(self):
+        Nx = torch.diag(nn.functional.softplus(self.nx) + self._min_var)    # shape: x x
+        return Nx
+
+    
     def make_pd(self, P, eps=1e-6):
         P = 0.5 * (P + P.transpose(-1, -2))
         P = P + eps * torch.eye(P.size(-1), device=P.device)
@@ -232,9 +243,8 @@ class Dynamics(nn.Module):
         mean = dist.loc
         cov = dist.covariance_matrix
 
-        Nx = torch.diag(nn.functional.softplus(self.nx) + self._min_var)    # shape: x x
         next_mean = mean @ self.A.T + u @ self.B.T
-        next_cov = self.A @ cov @ self.A.T + Nx
+        next_cov = self.A @ cov @ self.A.T + self.Nx
         next_cov = self.make_pd(next_cov)
 
         return MultivariateNormal(loc=next_mean, covariance_matrix=next_cov)
@@ -258,9 +268,7 @@ class Dynamics(nn.Module):
         mean = dist.loc
         cov = dist.covariance_matrix
 
-        Na = torch.diag(nn.functional.softplus(self.na) + self._min_var)    # shape: a a
-
-        K = cov @ self.C.T @ torch.linalg.pinv(self.C @ cov @ self.C.T + Na)
+        K = cov @ self.C.T @ torch.linalg.pinv(self.C @ cov @ self.C.T + self.Na)
         next_mean = mean + ((a - mean @ self.C.T).unsqueeze(1) @ K.transpose(1, 2)).squeeze(1)
         next_cov = (torch.eye(self.x_dim, device=self.device) - K @ self.C) @ cov
         next_cov = self.make_pd(next_cov)
@@ -286,21 +294,6 @@ class Dynamics(nn.Module):
 
         return dist
     
-    def compute_a_prior(
-        self,
-        x
-    ):
-        
-        Na = torch.diag(nn.functional.softplus(self.na) + self._min_var)    # shape: a a
-        mean = x @ self.C.T
-        cov = Na.repeat(x.shape[0], 1, 1)
-        dist = MultivariateNormal(
-            loc=mean,
-            covariance_matrix=cov
-        )
-
-        return dist
-    
     def compute_kl_loss(
         self,
         past_q_x: MultivariateNormal,
@@ -315,54 +308,86 @@ class Dynamics(nn.Module):
                 u: u_{t-d:t-1}
         """
         
-        Nx = torch.diag(nn.functional.softplus(self.nx) + self._min_var)    # shape: x x
+        mu_p = past_q_x.loc
+        sigma_p = past_q_x.covariance_matrix
+        mu_x = current_q_x.loc
+        sigma_x = current_q_x.covariance_matrix
 
-        mu_t = current_q_x.loc
-        sigma_t = current_q_x.covariance_matrix
-        mu_t_d = past_q_x.loc
-        sigma_t_d = past_q_x.covariance_matrix
-
-        # mu_d here is the same as mu_d_bar in the derivation
-        mu_d = past_q_x.loc
+        mu_d_bar = mu_p
         sigma_d = torch.zeros_like(past_q_x.covariance_matrix)
         d = u.shape[0]
-        b, n = mu_t.shape
 
         for t in range(d):
-            mu_d = mu_d @ self.A.T + u[t] @ self.B.T
-            sigma_d = self.A @ sigma_d @ self.A.T + Nx
+            mu_d_bar = mu_d_bar @ self.A.T + u[t] @ self.B.T
+            sigma_d = self.A @ sigma_d @ self.A.T + self.Nx
 
-        # ensure sigma_d stays PD
         sigma_d = self.make_pd(sigma_d)
+        sigma_d_inv = torch.linalg.pinv(sigma_d)
 
-        # kl computation
-        A_d   = torch.matrix_power(self.A, d)   # shape: x x
-        sigma_from_past = torch.einsum('ij, bjk, kl -> bil', A_d, sigma_t_d, A_d.T)     # shape: b x x
-        sigma_d_inv = torch.linalg.inv(sigma_d)
+        # logdet term
+        logdet = sigma_d.logdet() - sigma_x.logdet()
 
-        # logdet
-        logdet = torch.logdet(sigma_d) - torch.logdet(sigma_t)
-        
-        # trace1
-        trace1 = torch.diagonal(
-            sigma_d_inv @ sigma_t,
-            dim1=-1,
-            dim2=-2
-        ).sum(dim=-1)
+        # trace 1 term
+        trc1 = torch.einsum("bij,bji->b", sigma_d_inv, sigma_x)
 
-        # trace2
-        trace2 = torch.diagonal(
-            sigma_d_inv @ sigma_from_past,
-            dim1=-1,
-            dim2=-2
-        ).sum(dim=-1)
+        # trace 2 term
+        A_d = self.A.matrix_power(d)
+        trc2 = torch.einsum(
+            "bij,bji->b",
+            sigma_d_inv,
+            A_d @ sigma_p @ A_d.T
+        )
+
+        # quad term
+        delta = mu_d_bar - mu_x
+        quad = torch.einsum(
+            "bi,bij,bj->b",
+            delta,
+            sigma_d_inv,
+            delta
+        )
+
+        return 0.5 * (logdet + trc1 + trc2 + quad)
+
+
+    def compute_logratio_loss(
+        self,
+        current_q_x: MultivariateNormal,
+        current_q_a: MultivariateNormal,
+        current_q_a_sample: torch.Tensor,
+    ):
+        """
+            computes the third term in the ELBO
+            inputs:
+                - current_q_a_sample: a sample from q(a_t | y_t) which current_q_x is computed based on
+                - current_q_x: q(x_t | a_{1:t}, u_{0:t-1})
+                - current_q_a: q(a_t | y_t)
+        """
+
+        mu_x = current_q_x.loc
+        sigma_x = current_q_x.covariance_matrix
+
+        # entropy term
+        entropy = current_q_a.entropy()
+
+        # log det term
+        logdet = self.Na.logdet()
 
         # quadratic term
-        diff = mu_d - mu_t
-        quad = (
-            diff.unsqueeze(1) @ sigma_d_inv @ diff.unsqueeze(-1)
-        ).squeeze(-1).squeeze(-1)
+        delta = current_q_a_sample - mu_x @ self.C.T
 
-        const = -n * torch.ones_like(logdet)
+        quad = torch.einsum(
+            "bi,ij,bj->b",
+            delta,
+            torch.linalg.pinv(self.Na),
+            delta
+        )
 
-        return 0.5 * (trace1 + trace2 + quad + const + logdet)
+        # trace term
+        trc = torch.einsum(
+            "ij,bij->b",
+            self.C.T @ torch.linalg.pinv(self.Na) @ self.C,
+            sigma_x,
+        )
+
+        return -entropy + 0.5*(logdet + quad + trc)

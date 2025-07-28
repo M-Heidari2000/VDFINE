@@ -139,17 +139,13 @@ def train_backbone(
             ).clamp(min=config.kl_free_nats).mean()
 
             # third loss term
-            current_q_x_sample = current_q_x.rsample()
             # q_a
             current_q_a = encoder(y[t])
-            # p_a
-            current_p_a = dynamics_model.compute_a_prior(
-                x=current_q_x_sample,
-            )
             
-            loss3 += (
-                current_q_a.log_prob(q_a_samples[t])
-                - current_p_a.log_prob(q_a_samples[t])
+            loss3 += dynamics_model.compute_logratio_loss(
+                current_q_x=current_q_x,
+                current_q_a=current_q_a,
+                current_q_a_sample=q_a_samples[t],
             ).clamp(min=config.a_free_nats).mean()
 
         loss1 /= (config.chunk_length - config.overshoot_d - 1)
@@ -232,19 +228,14 @@ def train_backbone(
                     ).clamp(min=config.kl_free_nats).mean()
 
                     # third loss term
-                    current_q_x_sample = current_q_x.rsample()
                     # q_a
                     current_q_a = encoder(y[t])
-                    # p_a
-                    current_p_a = dynamics_model.compute_a_prior(
-                        x=current_q_x_sample,
-                    )
                     
-                    loss3 += (
-                        current_q_a.log_prob(q_a_samples[t])
-                        - current_p_a.log_prob(q_a_samples[t])
+                    loss3 += dynamics_model.compute_logratio_loss(
+                        current_q_x=current_q_x,
+                        current_q_a=current_q_a,
+                        current_q_a_sample=q_a_samples[t],
                     ).clamp(min=config.a_free_nats).mean()
-
 
                 loss1 /= (config.chunk_length - config.overshoot_d - 1)
                 loss2 /= (config.chunk_length - config.overshoot_d - 1)
@@ -343,7 +334,7 @@ def train_cost(
     optimizer = torch.optim.Adam(all_params, lr=config.lr, eps=config.eps)
 
     # train and test loop
-    for update in range(config.num_updates):
+    for update in range(config.num_cost_updates):
 
         # train
         cost_model.train()
