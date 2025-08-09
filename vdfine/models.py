@@ -111,17 +111,17 @@ class CostModel(nn.Module):
             torch.randn((x_dim, 1), device=self.device, dtype=torch.float32)
         )
 
-        # monotonic increasing function
-        self.F = lmn.MonotonicWrapper(
-            nn.Sequential(
-                lmn.LipschitzLinear(1, hidden_dim, kind="one-inf"),
-                lmn.GroupSort(2),
-                lmn.LipschitzLinear(hidden_dim, hidden_dim, kind="inf"),
-                lmn.GroupSort(2),
-                lmn.LipschitzLinear(hidden_dim, 1, kind="inf")
-            ),
-            monotonic_constraints=[1],
-        ).to(device=self.device)
+        # # monotonic increasing function
+        # self.F = lmn.MonotonicWrapper(
+        #     nn.Sequential(
+        #         lmn.LipschitzLinear(1, hidden_dim, kind="one-inf"),
+        #         lmn.GroupSort(2),
+        #         lmn.LipschitzLinear(hidden_dim, hidden_dim, kind="inf"),
+        #         lmn.GroupSort(2),
+        #         lmn.LipschitzLinear(hidden_dim, 1, kind="inf")
+        #     ),
+        #     monotonic_constraints=[1],
+        # ).to(device=self.device)
 
     @property
     def Q(self):
@@ -141,6 +141,7 @@ class CostModel(nn.Module):
         # TODO: use torch.einsum for efficieny
         cost = 0.5 * x @ self.Q @ x.T + 0.5 * u @ self.R @ u.T
         cost = cost.diagonal().unsqueeze(1) + x @ self.q
+        return cost
         return self.F(cost)
         
 

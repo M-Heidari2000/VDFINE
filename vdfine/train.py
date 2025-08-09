@@ -1,5 +1,6 @@
 import os
 import json
+import wandb
 import torch
 import einops
 import torch.nn as nn
@@ -7,7 +8,6 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 from torch.nn.utils import clip_grad_norm_
-from torch.utils.tensorboard.writer import SummaryWriter
 from .memory import ReplayBuffer
 from .configs import TrainConfig
 from .models import (
@@ -16,7 +16,6 @@ from .models import (
     Dynamics,
     CostModel,
 )
-from torch.distributions.kl import kl_divergence
 from torch.distributions import MultivariateNormal
 
 
@@ -31,8 +30,15 @@ def train_backbone(
     os.makedirs(log_dir, exist_ok=True)
     with open(log_dir / "args.json", "w") as f:
         json.dump(config.dict(), f)
-    
-    writer = SummaryWriter(log_dir=log_dir)
+
+    wandb.init(
+        project="Controlling from high-dimensional observations",
+        name="VDFINE",
+        config=config.dict(),
+    )
+
+    wandb.define_metric("global_step")
+    wandb.define_metric("*",step_metric="global_step")
 
     # set seed
     np.random.seed(config.seed)
@@ -67,6 +73,7 @@ def train_backbone(
         min_var=config.min_var
     ).to(device)
 
+    wandb.watch([encoder, dynamics_model, decoder], log="all", log_freq=10)
 
     all_params = (
         list(encoder.parameters()) +
@@ -158,10 +165,13 @@ def train_backbone(
         clip_grad_norm_(all_params, config.clip_grad_norm)
         optimizer.step()
 
-        writer.add_scalar("train/loss1", loss1.item(), update+1)
-        writer.add_scalar("train/loss2", loss2.item(), update+1)
-        writer.add_scalar("train/loss3", loss3.item(), update+1)
-        writer.add_scalar("train/total loss", loss.item(), update+1)
+        wandb.log({
+            "train/loss1": loss1.item(),
+            "train/loss2": loss2.item(),
+            "train/loss3": loss3.item(),
+            "train/total loss": loss.item(),
+            "global_step": update+1,
+        })
         print(f"update step: {update+1}, train_loss: {loss.item()}")
 
         # test
@@ -243,15 +253,20 @@ def train_backbone(
 
                 loss = loss1 + config.kl_beta * loss2 + config.a_beta * loss3
 
-                writer.add_scalar("test/loss1", loss1.item(), update+1)
-                writer.add_scalar("test/loss2", loss2.item(), update+1)
-                writer.add_scalar("test/loss3", loss3.item(), update+1)
-                writer.add_scalar("test/total loss", loss.item(), update+1)
+                wandb.log({
+                    "test/loss1": loss1.item(),
+                    "test/loss2": loss2.item(),
+                    "test/loss3": loss3.item(),
+                    "test/total loss": loss.item(),
+                    "global_step": update+1,
+                })
+                
                 print(f"update step: {update+1}, test_loss: {loss.item()}")
 
     torch.save(encoder.state_dict(), log_dir / "encoder.pth")
     torch.save(decoder.state_dict(), log_dir / "decoder.pth")
     torch.save(dynamics_model.state_dict(), log_dir / "dynamics.pth")
+    wandb.finish()
 
     return {"model_dir": log_dir}
 
@@ -267,7 +282,14 @@ def train_cost(
 
     # prepare logging
     log_dir = backbone_dir
-    writer = SummaryWriter(log_dir=log_dir)
+    wandb.init(
+        project="Controlling from high-dimensional observations",
+        name="VDFINE",
+        config=config.dict(),
+    )
+
+    wandb.define_metric("global_step")
+    wandb.define_metric("*",step_metric="global_step")
 
     # set seed
     np.random.seed(config.seed)
@@ -327,6 +349,8 @@ def train_cost(
     decoder.eval()
     dynamics_model.eval()
 
+    wandb.watch(cost_model, log="all", log_freq=10)
+
     all_params = (
         list(cost_model.parameters())
     )
@@ -381,14 +405,16 @@ def train_cost(
 
         cost_loss /= (config.chunk_length - 1)
 
-        loss = cost_loss
         optimizer.zero_grad()
-        loss.backward()
+        cost_loss.backward()
         clip_grad_norm_(all_params, config.clip_grad_norm)
         optimizer.step()
 
-        writer.add_scalar("train/cost_loss", cost_loss.item(), update+1)
-        print(f"update step: {update+1}, train_loss: {loss.item()}")
+        wandb.log({
+            "train/cost loss": cost_loss.item(),
+            "global_step": update+1,
+        })
+        print(f"update step: {update+1}, train_loss: {cost_loss.item()}")
 
         # test
         if update % config.test_interval == 0:
@@ -436,9 +462,14 @@ def train_cost(
 
             cost_loss /= (config.chunk_length - 1)
 
-            writer.add_scalar("test/cost_loss", cost_loss.item(), update+1)
-            print(f"test step: {update+1}, test_loss: {loss.item()}")
+            wandb.log({
+                "test/cost loss": cost_loss.item(),
+                "global_step": update+1,
+
+            })
+            print(f"test step: {update+1}, test_loss: {cost_loss.item()}")
     
     torch.save(cost_model.state_dict(), log_dir / "cost_model.pth")
+    wandb.finish()
 
     return {"model_dir": log_dir}
