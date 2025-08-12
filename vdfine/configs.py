@@ -23,5 +23,6 @@ class TrainConfig:
     a_free_nats: int = 3
     kl_beta: float = 1.0
     a_beta: float = 1.0
+    balancing_weight: float = 1.0
 
     dict = asdict
