@@ -166,15 +166,19 @@ class Dynamics(nn.Module):
         self.device = device
         self._min_var = min_var
 
-        # Dynamics matrices
-        self.M = nn.Parameter(
+        # # Dynamics matrices
+        # self.M = nn.Parameter(
+        #     torch.eye(self.x_dim, device=self.device)
+        # )
+        # self.N = nn.Parameter(
+        #     torch.eye(self.x_dim, device=self.device)
+        # )
+        # self.d = nn.Parameter(
+        #     torch.randn(self.x_dim, device=self.device)
+        # )
+
+        self.S = nn.Parameter(
             torch.eye(self.x_dim, device=self.device)
-        )
-        self.N = nn.Parameter(
-            torch.eye(self.x_dim, device=self.device)
-        )
-        self.d = nn.Parameter(
-            torch.randn(self.x_dim, device=self.device)
         )
         self.B = nn.Parameter(
             torch.randn(self.x_dim, self.u_dim, device=self.device),
@@ -194,18 +198,30 @@ class Dynamics(nn.Module):
 
     @property
     def A(self):
-        # constructing a stable A matrix
-        # softplus ensures positive entries
-        d = nn.functional.softplus(self.d)
-        # QR decomposition to obtain a unitary matrix
-        # why sign correction of the columns?
-        Q, R = torch.linalg.qr(self.M, mode="reduced")
-        Q = Q @ R.diagonal().sign().diag()
+        S = self.S # unconstrained
+        # power iteration for spectral norm (stop-grad on sigma_hat is ok)
+        v = torch.randn(self.x_dim, device=self.device)
+        for _ in range(5):
+            v = torch.nn.functional.normalize(S.T @ v, dim=0)
+        sigma = (v @ (S @ v)).abs().clamp_min(1e-6)
+        return S / (1.0 + sigma) # ensures ||A||_2 < 1
 
-        U, R2 = torch.linalg.qr(self.N, mode="reduced")
-        U = U @ R2.diagonal().sign().diag()
 
-        return U @ d.sqrt().diag() @ Q @ (1 / (1+d).sqrt()).diag() @ U.T
+
+    # @property
+    # def A(self):
+    #     # constructing a stable A matrix
+    #     # softplus ensures positive entries
+    #     d = nn.functional.softplus(self.d)
+    #     # QR decomposition to obtain a unitary matrix
+    #     # why sign correction of the columns?
+    #     Q, R = torch.linalg.qr(self.M, mode="reduced")
+    #     Q = Q @ R.diagonal().sign().diag()
+
+    #     U, R2 = torch.linalg.qr(self.N, mode="reduced")
+    #     U = U @ R2.diagonal().sign().diag()
+
+    #     return U @ d.sqrt().diag() @ Q @ (1 / (1+d).sqrt()).diag() @ U.T
     
     @property
     def Na(self):

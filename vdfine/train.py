@@ -154,6 +154,12 @@ def train_backbone(
         loss = loss1 + config.kl_beta * loss2 + config.a_beta * loss3
         optimizer.zero_grad()
         loss.backward()
+
+        for name, param in dynamics_model.named_parameters():
+            print(f"{name}, {param.grad}")
+
+        print("="*100)
+
         clip_grad_norm_(all_params, config.clip_grad_norm)
         optimizer.step()
 
@@ -381,6 +387,12 @@ def train_cost(
         loss = cost_loss
         optimizer.zero_grad()
         loss.backward()
+
+        print(f"A: {cost_model.A.grad}")
+        print(f"B: {cost_model.B.grad}")
+        print(f"q: {cost_model.q.grad}")
+        print("="*100)
+
         clip_grad_norm_(all_params, config.clip_grad_norm)
         optimizer.step()
 
