@@ -16,7 +16,6 @@ from .models import (
     Dynamics,
     CostModel,
 )
-from .control_utils import compute_gramians
 from torch.distributions.kl import kl_divergence
 from torch.distributions import MultivariateNormal
 
@@ -151,20 +150,10 @@ def train_backbone(
         loss2 /= (config.chunk_length - config.overshoot_d - 1)
         loss3 /= (config.chunk_length - config.overshoot_d - 1)
 
-            # balancing loss
-        Wc, Wo = compute_gramians(
-            A=dynamics_model.A,
-            B=dynamics_model.B,
-            C=dynamics_model.C
-        )
-
-        balancing_loss = 1 / torch.trace(Wc @ Wo)
-
         loss = (
             loss1 +
             config.kl_beta * loss2 +
-            config.a_beta * loss3 +
-            config.balancing_weight * balancing_loss
+            config.a_beta * loss3
         )
 
         optimizer.zero_grad()
@@ -182,7 +171,6 @@ def train_backbone(
         writer.add_scalar("train/loss2", loss2.item(), update+1)
         writer.add_scalar("train/loss3", loss3.item(), update+1)
         writer.add_scalar("train/total loss", loss.item(), update+1)
-        writer.add_scalar("test/balancing loss", balancing_loss.item(), update+1)
         print(f"update step: {update+1}, train_loss: {loss.item()}")
 
         # test
@@ -260,26 +248,15 @@ def train_backbone(
                 loss2 /= (config.chunk_length - config.overshoot_d - 1)
                 loss3 /= (config.chunk_length - config.overshoot_d - 1)
 
-                # balancing loss
-                Wc, Wo = compute_gramians(
-                    A=dynamics_model.A,
-                    B=dynamics_model.B,
-                    C=dynamics_model.C
-                )
-
-                balancing_loss = 1 / torch.trace(Wc @ Wo)
-
                 loss = (
                     loss1 +
                     config.kl_beta * loss2 +
-                    config.a_beta * loss3 +
-                    config.balancing_weight * balancing_loss
+                    config.a_beta * loss3
                 )
 
                 writer.add_scalar("test/loss1", loss1.item(), update+1)
                 writer.add_scalar("test/loss2", loss2.item(), update+1)
                 writer.add_scalar("test/loss3", loss3.item(), update+1)
-                writer.add_scalar("test/balancing loss", balancing_loss.item(), update+1)
 
                 writer.add_scalar("test/total loss", loss.item(), update+1)
                 print(f"update step: {update+1}, test_loss: {loss.item()}")
@@ -340,6 +317,7 @@ def train_cost(
     cost_model = CostModel(
         x_dim=config.x_dim,
         u_dim=train_replay_buffer.u_dim,
+        hidden_dim=config.hidden_dim,
         device=device
     ).to(device)
 
@@ -366,7 +344,7 @@ def train_cost(
         list(cost_model.parameters())
     )
 
-    optimizer = torch.optim.Adam(all_params, lr=config.lr, eps=config.eps)
+    optimizer = torch.optim.Adam(all_params, lr=config.cost_lr, eps=config.eps)
 
     # train and test loop
     for update in range(config.num_updates):

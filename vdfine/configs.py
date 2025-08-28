@@ -15,6 +15,7 @@ class TrainConfig:
     chunk_length: int = 10
     batch_size: int = 64
     lr: float = 1e-3
+    cost_lr: float = 1e-3
     eps: float = 1e-8
     clip_grad_norm: int = 1000
     overshoot_d: int = 3
