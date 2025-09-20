@@ -165,6 +165,11 @@ def train_backbone(
         clip_grad_norm_(all_params, config.clip_grad_norm)
         optimizer.step()
 
+        for name, param in dynamics_model.named_parameters():
+            print(f"{name}: {param.grad}")
+        
+        print("="*100)
+
         wandb.log({
             "train/loss1": loss1.item(),
             "train/loss2": loss2.item(),
@@ -327,6 +332,7 @@ def train_cost(
     cost_model = CostModel(
         x_dim=config.x_dim,
         u_dim=train_replay_buffer.u_dim,
+        hidden_dim=config.hidden_dim,
         device=device
     ).to(device)
 
@@ -355,7 +361,7 @@ def train_cost(
         list(cost_model.parameters())
     )
 
-    optimizer = torch.optim.Adam(all_params, lr=config.lr, eps=config.eps)
+    optimizer = torch.optim.Adam(all_params, lr=config.cost_lr, eps=config.eps)
 
     # train and test loop
     for update in range(config.num_cost_updates):

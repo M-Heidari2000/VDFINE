@@ -168,14 +168,8 @@ class Dynamics(nn.Module):
         self._min_var = min_var
 
         # Dynamics matrices
-        self.M = nn.Parameter(
+        self.A = nn.Parameter(
             torch.eye(self.x_dim, device=self.device)
-        )
-        self.N = nn.Parameter(
-            torch.eye(self.x_dim, device=self.device)
-        )
-        self.d = nn.Parameter(
-            torch.randn(self.x_dim, device=self.device)
         )
         self.B = nn.Parameter(
             torch.randn(self.x_dim, self.u_dim, device=self.device),
@@ -194,21 +188,6 @@ class Dynamics(nn.Module):
         )
 
     @property
-    def A(self):
-        # constructing a stable A matrix
-        # softplus ensures positive entries
-        d = nn.functional.softplus(self.d)
-        # QR decomposition to obtain a unitary matrix
-        # why sign correction of the columns?
-        Q, R = torch.linalg.qr(self.M, mode="reduced")
-        Q = Q @ R.diagonal().sign().diag()
-
-        U, R2 = torch.linalg.qr(self.N, mode="reduced")
-        U = U @ R2.diagonal().sign().diag()
-
-        return U @ d.sqrt().diag() @ Q @ (1 / (1+d).sqrt()).diag() @ U.T
-    
-    @property
     def Na(self):
         Na = torch.diag(nn.functional.softplus(self.na) + self._min_var)    # shape: a a
         return Na
@@ -218,7 +197,6 @@ class Dynamics(nn.Module):
         Nx = torch.diag(nn.functional.softplus(self.nx) + self._min_var)    # shape: x x
         return Nx
 
-    
     def make_pd(self, P, eps=1e-6):
         P = 0.5 * (P + P.transpose(-1, -2))
         P = P + eps * torch.eye(P.size(-1), device=P.device)
