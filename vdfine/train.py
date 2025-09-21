@@ -5,11 +5,16 @@ import torch
 import einops
 import torch.nn as nn
 import numpy as np
+import gymnasium as gym
+from gymnasium.wrappers import RescaleAction, DtypeObservation
 from pathlib import Path
+from tqdm import tqdm
+from argparse import Namespace
 from datetime import datetime
 from torch.nn.utils import clip_grad_norm_
+from .agents import MPCAgent
 from .memory import ReplayBuffer
-from .configs import TrainConfig
+from .env_utils import ActionRepeatWrapper
 from .models import (
     Encoder,
     Decoder,
@@ -19,416 +24,129 @@ from .models import (
 from torch.distributions import MultivariateNormal
 
 
-def train_backbone(
-    config: TrainConfig,
-    train_replay_buffer: ReplayBuffer,
-    test_replay_buffer: ReplayBuffer,
+def train(
+    args: Namespace,
 ):
 
     # prepare logging
-    log_dir = Path(config.log_dir) / datetime.now().strftime("%Y%m%d_%H%M")
+    log_dir = Path(args.log_dir) / datetime.now().strftime("%Y%m%d_%H%M")
     os.makedirs(log_dir, exist_ok=True)
     with open(log_dir / "args.json", "w") as f:
-        json.dump(config.dict(), f)
+        json.dump(vars(args), f)
 
     wandb.init(
         project="Controlling from high-dimensional observations",
         name="VDFINE",
-        config=config.dict(),
+        config=vars(args),
     )
 
     wandb.define_metric("global_step")
     wandb.define_metric("*",step_metric="global_step")
 
     # set seed
-    np.random.seed(config.seed)
-    torch.manual_seed(config.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(config.seed)
+        torch.cuda.manual_seed(args.seed)
+
+    # make environments
+    env = gym.make(id=args.env, g=3.0)
+    env = DtypeObservation(env=env, dtype=np.float32)
+    env = RescaleAction(env=env, min_action=-1.0, max_action=1.0)
+    env = ActionRepeatWrapper(env=env, repeat=args.action_repeat)
 
     # define models and optimizer
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if (torch.cuda.is_available() and not args.disable_gpu) else "cpu"
 
     encoder = Encoder(
-        y_dim=train_replay_buffer.y_dim,
-        a_dim=config.a_dim,
-        hidden_dim=config.hidden_dim,
-        dropout_p=config.dropout_p,
-        min_var=config.min_var
+        y_dim=env.observation_space.shape[0],
+        a_dim=args.a_dim,
+        hidden_dim=args.hidden_dim,
+        dropout_p=args.dropout_p,
+        min_var=args.min_var
     ).to(device)
 
     decoder = Decoder(
-        y_dim=train_replay_buffer.y_dim,
-        a_dim=config.a_dim,
-        hidden_dim=config.hidden_dim,
-        dropout_p=config.dropout_p,
-        min_var=config.min_var
+        y_dim=env.observation_space.shape[0],
+        a_dim=args.a_dim,
+        hidden_dim=args.hidden_dim,
+        dropout_p=args.dropout_p,
+        min_var=args.min_var
     ).to(device)
 
     dynamics_model = Dynamics(
-        x_dim=config.x_dim,
-        u_dim=train_replay_buffer.u_dim,
-        a_dim=config.a_dim,
+        x_dim=args.x_dim,
+        u_dim=env.action_space.shape[0],
+        a_dim=args.a_dim,
         device=device,
-        min_var=config.min_var
+        min_var=args.min_var
     ).to(device)
 
-    wandb.watch([encoder, dynamics_model, decoder], log="all", log_freq=10)
+    cost_model = CostModel(
+        x_dim=args.x_dim,
+        u_dim=env.action_space.shape[0],
+        device=device,
+        hidden_dim=args.hidden_dim,
+    ).to(device)
+
+    wandb.watch([encoder, dynamics_model, decoder, cost_model], log="all", log_freq=10)
 
     all_params = (
         list(encoder.parameters()) +
         list(decoder.parameters()) + 
-        list(dynamics_model.parameters())
-    )
-
-    optimizer = torch.optim.Adam(all_params, lr=config.lr, eps=config.eps)
-
-    # train and test loop
-    for update in range(config.num_updates):
-
-        # train
-        encoder.train()
-        decoder.train()
-        dynamics_model.train()
-
-        y, u, c, _ = train_replay_buffer.sample(
-            batch_size=config.batch_size,
-            chunk_length=config.chunk_length,
-        )
-
-        # convert to tensor, transform to device, reshape to time-first
-        y = torch.as_tensor(y, device=device)
-        y = einops.rearrange(y, "b l y -> l b y")
-        u = torch.as_tensor(u, device=device)
-        u = einops.rearrange(u, "b l u -> l b u")
-
-        q_a_samples = encoder(einops.rearrange(y, "l b y -> (l b) y")).rsample()
-        q_a_samples = einops.rearrange(
-            q_a_samples,
-            "(l b) a -> l b a",
-            b=config.batch_size
-        )
-
-        # Initial distribution N(0, I)
-        q_x = [MultivariateNormal(
-            loc=torch.zeros((config.batch_size, config.x_dim), dtype=torch.float32, device=device),
-            covariance_matrix=torch.diag_embed(torch.ones((config.batch_size, config.x_dim), device=device, dtype=torch.float32)),
-        ) for _ in range(config.chunk_length)] 
-
-        # Kalman filtering
-        for t in range(1, config.chunk_length):
-            q_x[t] = dynamics_model.posterior_step(
-                dist=q_x[t-1],
-                u=u[t-1],
-                a=q_a_samples[t],
-            )
-        
-        loss1 = 0.0
-        loss2 = 0.0
-        loss3 = 0.0
-
-        for t in range(config.overshoot_d+1, config.chunk_length):
-            # first loss term
-            y_recon = decoder(q_a_samples[t])
-            loss1 += nn.MSELoss()(y_recon, y[t])
-
-            # second loss term
-            # q(x_{t-d}|a_{1:t-d}, u_{0:t-d-1})
-            past_q_x = q_x[t-config.overshoot_d]
-
-            # q(x_t|a_{1:t}, u_{0:t-1})
-            current_q_x = q_x[t]
-
-            loss2 += dynamics_model.compute_kl_loss(
-                past_q_x=past_q_x,
-                current_q_x=current_q_x,
-                u=u[t-config.overshoot_d: t],
-            ).clamp(min=config.kl_free_nats).mean()
-
-            # third loss term
-            # q_a
-            current_q_a = encoder(y[t])
-            
-            loss3 += dynamics_model.compute_logratio_loss(
-                current_q_x=current_q_x,
-                current_q_a=current_q_a,
-                current_q_a_sample=q_a_samples[t],
-            ).clamp(min=config.a_free_nats).mean()
-
-        loss1 /= (config.chunk_length - config.overshoot_d - 1)
-        loss2 /= (config.chunk_length - config.overshoot_d - 1)
-        loss3 /= (config.chunk_length - config.overshoot_d - 1)
-
-        loss = loss1 + config.kl_beta * loss2 + config.a_beta * loss3
-        optimizer.zero_grad()
-        loss.backward()
-        clip_grad_norm_(all_params, config.clip_grad_norm)
-        optimizer.step()
-
-        for name, param in dynamics_model.named_parameters():
-            print(f"{name}: {param.grad}")
-        
-        print("="*100)
-
-        wandb.log({
-            "train/loss1": loss1.item(),
-            "train/loss2": loss2.item(),
-            "train/loss3": loss3.item(),
-            "train/total loss": loss.item(),
-            "global_step": update+1,
-        })
-        print(f"update step: {update+1}, train_loss: {loss.item()}")
-
-        # test
-        if update % config.test_interval == 0:
-            # test
-            encoder.eval()
-            decoder.eval()
-            dynamics_model.eval()
-
-            with torch.no_grad():
-
-                y, u, c, _ = test_replay_buffer.sample(
-                    batch_size=config.batch_size,
-                    chunk_length=config.chunk_length,
-                )
-
-                # convert to tensor, transform to device, reshape to time-first
-                y = torch.as_tensor(y, device=device)
-                y = einops.rearrange(y, "b l y -> l b y")
-                u = torch.as_tensor(u, device=device)
-                u = einops.rearrange(u, "b l u -> l b u")
-
-                q_a_samples = encoder(einops.rearrange(y, "l b y -> (l b) y")).rsample()
-                q_a_samples = einops.rearrange(
-                    q_a_samples,
-                    "(l b) a -> l b a",
-                    b=config.batch_size
-                )
-
-                # Initial distribution N(0, I)
-                q_x = [MultivariateNormal(
-                    loc=torch.zeros((config.batch_size, config.x_dim), dtype=torch.float32, device=device),
-                    covariance_matrix=torch.diag_embed(torch.ones((config.batch_size, config.x_dim), device=device, dtype=torch.float32)),
-                ) for _ in range(config.chunk_length)]
-
-                # Kalman filtering
-                for t in range(1, config.chunk_length):
-                    q_x[t] = dynamics_model.posterior_step(
-                        dist=q_x[t-1],
-                        u=u[t-1],
-                        a=q_a_samples[t],
-                    )
-                
-                loss1 = 0.0
-                loss2 = 0.0
-                loss3 = 0.0
-
-                for t in range(config.overshoot_d+1, config.chunk_length):
-                    # first loss term
-                    y_recon = decoder(q_a_samples[t])
-                    loss1 += nn.MSELoss()(y_recon, y[t])
-
-                    # second loss term
-                    # q(x_{t-d}|a_{1:t-d}, u_{0:t-d-1})
-                    past_q_x = q_x[t-config.overshoot_d]
-
-                    # q(x_t|a_{1:t}, u_{0:t-1})
-                    current_q_x = q_x[t]
-
-                    loss2 += dynamics_model.compute_kl_loss(
-                        past_q_x=past_q_x,
-                        current_q_x=current_q_x,
-                        u=u[t-config.overshoot_d: t],
-                    ).clamp(min=config.kl_free_nats).mean()
-
-                    # third loss term
-                    # q_a
-                    current_q_a = encoder(y[t])
-                    
-                    loss3 += dynamics_model.compute_logratio_loss(
-                        current_q_x=current_q_x,
-                        current_q_a=current_q_a,
-                        current_q_a_sample=q_a_samples[t],
-                    ).clamp(min=config.a_free_nats).mean()
-
-                loss1 /= (config.chunk_length - config.overshoot_d - 1)
-                loss2 /= (config.chunk_length - config.overshoot_d - 1)
-                loss3 /= (config.chunk_length - config.overshoot_d - 1)
-
-                loss = loss1 + config.kl_beta * loss2 + config.a_beta * loss3
-
-                wandb.log({
-                    "test/loss1": loss1.item(),
-                    "test/loss2": loss2.item(),
-                    "test/loss3": loss3.item(),
-                    "test/total loss": loss.item(),
-                    "global_step": update+1,
-                })
-                
-                print(f"update step: {update+1}, test_loss: {loss.item()}")
-
-    torch.save(encoder.state_dict(), log_dir / "encoder.pth")
-    torch.save(decoder.state_dict(), log_dir / "decoder.pth")
-    torch.save(dynamics_model.state_dict(), log_dir / "dynamics.pth")
-    wandb.finish()
-
-    return {"model_dir": log_dir}
-
-
-def train_cost(
-    backbone_dir: Path,
-    train_replay_buffer: ReplayBuffer,
-    test_replay_buffer: ReplayBuffer,
-):
-    
-    with open(backbone_dir / "args.json", "r") as f:
-        config = TrainConfig(**json.load(f))
-
-    # prepare logging
-    log_dir = backbone_dir
-    wandb.init(
-        project="Controlling from high-dimensional observations",
-        name="VDFINE",
-        config=config.dict(),
-    )
-
-    wandb.define_metric("global_step")
-    wandb.define_metric("*",step_metric="global_step")
-
-    # set seed
-    np.random.seed(config.seed)
-    torch.manual_seed(config.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(config.seed)
-
-    # define models and optimizer
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    encoder = Encoder(
-        y_dim=train_replay_buffer.y_dim,
-        a_dim=config.a_dim,
-        hidden_dim=config.hidden_dim,
-        dropout_p=config.dropout_p,
-        min_var=config.min_var
-    ).to(device)
-
-    decoder = Decoder(
-        y_dim=train_replay_buffer.y_dim,
-        a_dim=config.a_dim,
-        hidden_dim=config.hidden_dim,
-        dropout_p=config.dropout_p,
-        min_var=config.min_var
-    ).to(device)
-
-    dynamics_model = Dynamics(
-        x_dim=config.x_dim,
-        u_dim=train_replay_buffer.u_dim,
-        a_dim=config.a_dim,
-        device=device,
-        min_var=config.min_var
-    ).to(device)
-
-    cost_model = CostModel(
-        x_dim=config.x_dim,
-        u_dim=train_replay_buffer.u_dim,
-        hidden_dim=config.hidden_dim,
-        device=device
-    ).to(device)
-
-    # load the backbone
-    encoder.load_state_dict(torch.load(backbone_dir / "encoder.pth", weights_only=True))
-    dynamics_model.load_state_dict(torch.load(backbone_dir / "dynamics.pth", weights_only=True))
-    decoder.load_state_dict(torch.load(backbone_dir / "decoder.pth", weights_only=True))
-
-    # freeze backbone models
-    for p in encoder.parameters():
-        p.requires_grad = False
-
-    for p in decoder.parameters():
-        p.requires_grad = False
-
-    for p in dynamics_model.parameters():
-        p.requires_grad = False
-
-    encoder.eval()
-    decoder.eval()
-    dynamics_model.eval()
-
-    wandb.watch(cost_model, log="all", log_freq=10)
-
-    all_params = (
+        list(dynamics_model.parameters()) +
         list(cost_model.parameters())
     )
 
-    optimizer = torch.optim.Adam(all_params, lr=config.cost_lr, eps=config.eps)
+    optimizer = torch.optim.Adam(all_params, lr=args.lr, eps=args.eps)
+
+    # agent
+    agent = MPCAgent(
+        encoder=encoder,
+        dynamics_model=dynamics_model,
+        cost_model=cost_model,
+        planning_horizon=args.planning_horizon
+    )
+
+    # replay buffer
+    buffer = ReplayBuffer(
+        capacity=args.buffer_capacity,
+        y_dim=env.observation_space.shape[0],
+        u_dim=env.action_space.shape[0],
+    )
+
+    # collect seed episodes
+    print("collecting seed episodes")
+    for s in tqdm(range(1, args.seed_episodes+1)):
+        obs, _ = env.reset()
+        done = False
+        while not done:
+            action = env.action_space.sample()
+            next_obs, reward, terminated, truncated, _ = env.step(action=action)
+            done = terminated or truncated
+            buffer.push(
+                y=obs,
+                u=action,
+                c=-reward,
+                done=done
+            )
+            obs = next_obs
+
 
     # train and test loop
-    for update in range(config.num_cost_updates):
+    for episode in tqdm(range(args.all_episodes)):
 
-        # train
-        cost_model.train()
+        # model fit
+        for s in range(args.collect_interval):
 
-        y, u, c, _ = train_replay_buffer.sample(
-            batch_size=config.batch_size,
-            chunk_length=config.chunk_length,
-        )
+            encoder.train()
+            decoder.train()
+            dynamics_model.train()
+            cost_model.train()
 
-        # convert to tensor, transform to device, reshape to time-first
-        y = torch.as_tensor(y, device=device)
-        y = einops.rearrange(y, "b l y -> l b y")
-        u = torch.as_tensor(u, device=device)
-        u = einops.rearrange(u, "b l u -> l b u")
-        c = torch.as_tensor(c, device=device)
-        c = einops.rearrange(c, "b l 1 -> l b 1")
-
-        q_a_samples = encoder(einops.rearrange(y, "l b y -> (l b) y")).rsample()
-        q_a_samples = einops.rearrange(
-            q_a_samples,
-            "(l b) a -> l b a",
-            b=config.batch_size
-        )
-
-        # Initial distribution N(0, I)
-        q_x = [MultivariateNormal(
-            loc=torch.zeros((config.batch_size, config.x_dim), dtype=torch.float32, device=device),
-            covariance_matrix=torch.diag_embed(torch.ones((config.batch_size, config.x_dim), device=device, dtype=torch.float32)),
-        ) for _ in range(config.chunk_length)] 
-
-        # Kalman filtering
-        for t in range(1, config.chunk_length):
-            q_x[t] = dynamics_model.posterior_step(
-                dist=q_x[t-1],
-                u=u[t-1],
-                a=q_a_samples[t],
-            )
-
-        cost_loss = 0.0
-
-        for t in range(1, config.chunk_length):
-            current_q_x_sample = q_x[t].rsample()
-            cost_loss += nn.MSELoss()(cost_model(x=current_q_x_sample, u=u[t]), c[t])
-
-        cost_loss /= (config.chunk_length - 1)
-
-        optimizer.zero_grad()
-        cost_loss.backward()
-        clip_grad_norm_(all_params, config.clip_grad_norm)
-        optimizer.step()
-
-        wandb.log({
-            "train/cost loss": cost_loss.item(),
-            "global_step": update+1,
-        })
-        print(f"update step: {update+1}, train_loss: {cost_loss.item()}")
-
-        # test
-        if update % config.test_interval == 0:
-            cost_model.eval()
-
-            y, u, c, _ = test_replay_buffer.sample(
-                batch_size=config.batch_size,
-                chunk_length=config.chunk_length,
+            y, u, c, _ = buffer.sample(
+                batch_size=args.batch_size,
+                chunk_length=args.chunk_length,
             )
 
             # convert to tensor, transform to device, reshape to time-first
@@ -443,38 +161,132 @@ def train_cost(
             q_a_samples = einops.rearrange(
                 q_a_samples,
                 "(l b) a -> l b a",
-                b=config.batch_size
+                b=args.batch_size
             )
 
             # Initial distribution N(0, I)
             q_x = [MultivariateNormal(
-                loc=torch.zeros((config.batch_size, config.x_dim), dtype=torch.float32, device=device),
-                covariance_matrix=torch.diag_embed(torch.ones((config.batch_size, config.x_dim), device=device, dtype=torch.float32)),
-            ) for _ in range(config.chunk_length)] 
+                loc=torch.zeros((args.batch_size, args.x_dim), dtype=torch.float32, device=device),
+                covariance_matrix=torch.diag_embed(torch.ones((args.batch_size, args.x_dim), device=device, dtype=torch.float32)),
+            ) for _ in range(args.chunk_length)] 
 
             # Kalman filtering
-            for t in range(1, config.chunk_length):
+            for t in range(1, args.chunk_length):
                 q_x[t] = dynamics_model.posterior_step(
                     dist=q_x[t-1],
                     u=u[t-1],
                     a=q_a_samples[t],
                 )
             
+            loss1 = 0.0
+            loss2 = 0.0
+            loss3 = 0.0
             cost_loss = 0.0
 
-            for t in range(1, config.chunk_length):
-                current_q_x_sample = q_x[t].rsample()
+            for t in range(args.overshoot_d+1, args.chunk_length):
+                # first loss term
+                y_recon = decoder(q_a_samples[t])
+                loss1 += nn.MSELoss()(y_recon, y[t])
+
+                # second loss term
+                # q(x_{t-d}|a_{1:t-d}, u_{0:t-d-1})
+                past_q_x = q_x[t-args.overshoot_d]
+
+                # q(x_t|a_{1:t}, u_{0:t-1})
+                current_q_x = q_x[t]
+
+                loss2 += dynamics_model.compute_kl_loss(
+                    past_q_x=past_q_x,
+                    current_q_x=current_q_x,
+                    u=u[t-args.overshoot_d: t],
+                ).clamp(min=args.kl_free_nats).mean()
+
+                # third loss term
+                # q_a
+                current_q_a = encoder(y[t])
+                
+                loss3 += dynamics_model.compute_logratio_loss(
+                    current_q_x=current_q_x,
+                    current_q_a=current_q_a,
+                    current_q_a_sample=q_a_samples[t],
+                ).clamp(min=args.a_free_nats).mean()
+
+                # cost loss
+                current_q_x_sample = current_q_x.rsample()
                 cost_loss += nn.MSELoss()(cost_model(x=current_q_x_sample, u=u[t]), c[t])
 
-            cost_loss /= (config.chunk_length - 1)
+            loss1 /= (args.chunk_length - args.overshoot_d - 1)
+            loss2 /= (args.chunk_length - args.overshoot_d - 1)
+            loss3 /= (args.chunk_length - args.overshoot_d - 1)
+            cost_loss /= (args.chunk_length - args.overshoot_d - 1)
 
+            loss = loss1 + args.kl_beta * loss2 + args.a_beta * loss3 + cost_loss
+            optimizer.zero_grad()
+            loss.backward()
+            clip_grad_norm_(all_params, args.clip_grad_norm)
+            optimizer.step()
+
+            global_step = episode * args.collect_interval + s
             wandb.log({
-                "test/cost loss": cost_loss.item(),
-                "global_step": update+1,
-
+                "train/loss1": loss1.item(),
+                "train/loss2": loss2.item(),
+                "train/loss3": loss3.item(),
+                "train/cost loss": cost_loss.item(),
+                "train/total loss": loss.item(),
+                "global_step": global_step,
             })
-            print(f"test step: {update+1}, test_loss: {cost_loss.item()}")
+        
+        # data collection
+        with torch.no_grad():
+            obs, info = env.reset()
+            agent.reset()
+            action = env.action_space.sample()
+            done = False
+            while not done:
+                planned_actions = agent(y=obs, u=action, explore=True)
+                action = planned_actions[0]
+                next_obs, reward, terminated, truncated, _ = env.step(action=action)
+                done = terminated or truncated
+                buffer.push(
+                    y=obs,
+                    u=action,
+                    c=-reward,
+                    done=done
+                )
+                obs = next_obs
     
+        # test
+        if episode % args.test_interval == 0:
+            rewards = []
+            print("testing ...")
+            for _ in tqdm(range(args.num_test_envs)):
+                encoder.eval()
+                decoder.eval()
+                dynamics_model.eval()
+                cost_model.eval()
+                with torch.no_grad():
+                    obs, info = env.reset()
+                    agent.reset()
+                    action = env.action_space.sample()
+                    done = False
+                    total_reward = 0.0
+                    while not done:
+                        planned_actions = agent(y=obs, u=action, explore=False)
+                        action = planned_actions[0]
+                        next_obs, reward, terminated, truncated, _ = env.step(action=action)
+                        done = terminated or truncated
+                        obs = next_obs
+                        total_reward += reward
+                rewards.append(total_reward)
+                
+            avg_mean = np.array(rewards).mean()
+            wandb.log({
+                "average reward": avg_mean
+            })
+
+    torch.save(encoder.state_dict(), log_dir / "encoder.pth")
+    torch.save(decoder.state_dict(), log_dir / "decoder.pth")
+    torch.save(dynamics_model.state_dict(), log_dir / "dynamics.pth")
     torch.save(cost_model.state_dict(), log_dir / "cost_model.pth")
     wandb.finish()
 

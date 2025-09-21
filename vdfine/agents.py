@@ -116,11 +116,13 @@ class MPCAgent:
         dynamics_model,
         cost_model,
         planning_horizon: int,
+        action_noise: float = 0.3,
     ):
         self.encoder = encoder
         self.dynamics_model = dynamics_model
         self.cost_model = cost_model
         self.planning_horizon = planning_horizon
+        self.action_noise = action_noise
 
         self.device = next(encoder.parameters()).device
 
@@ -162,7 +164,7 @@ class MPCAgent:
             covariance_matrix=torch.eye(self.dynamics_model.x_dim, device=self.device).unsqueeze(0)
         )
 
-    def __call__(self, y, u, sample: bool=False):
+    def __call__(self, y, u, sample: bool=False, explore: bool=False):
 
         """
             inputs: y_t, u_{t-1}
@@ -191,6 +193,9 @@ class MPCAgent:
                 self.quadcost,
                 self.lindx
             )
+            
+            if explore:
+                planned_u += self.action_noise * torch.randn_like(planned_u)
             
         return np.clip(planned_u.squeeze(1).cpu().numpy(), a_min=-1.0, a_max=1.0)
     
